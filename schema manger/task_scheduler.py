@@ -86,6 +86,40 @@ class TaskFileScope:
             os.path.relpath(canonical, self.project_root),
         )
 
+    def search_files(self, requested_path: str) -> tuple[str, ...]:
+        candidate = os.path.expanduser(requested_path or ".")
+        if not os.path.isabs(candidate):
+            candidate = os.path.join(self.project_root, candidate)
+        candidate = os.path.realpath(os.path.abspath(candidate))
+        try:
+            if os.path.commonpath((self.project_root, candidate)) != self.project_root:
+                raise ValueError("Search path is outside the task project scope")
+        except ValueError as error:
+            if str(error) == "Search path is outside the task project scope":
+                raise
+            raise ValueError("Search path is outside the task project scope") from error
+
+        allowed = self.read_paths | self.write_paths
+        if candidate in allowed:
+            return (candidate,)
+        matches = []
+        for path in allowed:
+            try:
+                if os.path.commonpath((candidate, path)) == candidate:
+                    matches.append(path)
+            except ValueError:
+                continue
+        return tuple(sorted(matches))
+
+    def check_search_access(self, requested_path: str) -> str | None:
+        try:
+            matches = self.search_files(requested_path)
+        except ValueError as error:
+            return str(error)
+        if not matches:
+            return "Search path does not contain any files declared in the task scope."
+        return None
+
     def externalize_result(self, value: Any) -> Any:
         if self.staging_root is None:
             return value

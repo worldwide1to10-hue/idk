@@ -193,6 +193,57 @@ class Store:
         ).fetchone()
         return row[0]
 
+    def list_sessions(self, limit: int = 50) -> list[dict]:
+        """List recent sessions using their first user message as a title."""
+        bounded_limit = max(1, min(int(limit), 200))
+        rows = self.db.execute(
+            """SELECT
+                   messages.session_id,
+                   COUNT(*) AS message_count,
+                   MAX(messages.timestamp) AS updated_at,
+                   COALESCE((
+                       SELECT first_user.content
+                       FROM messages AS first_user
+                       WHERE first_user.session_id = messages.session_id
+                         AND first_user.role = 'user'
+                       ORDER BY first_user.id ASC LIMIT 1
+                   ), '') AS title,
+                   COALESCE((
+                       SELECT last_message.content
+                       FROM messages AS last_message
+                       WHERE last_message.session_id = messages.session_id
+                       ORDER BY last_message.id DESC LIMIT 1
+                   ), '') AS last_message
+               FROM messages
+               GROUP BY messages.session_id
+               ORDER BY updated_at DESC
+               LIMIT ?""",
+            (bounded_limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_session_messages(
+        self,
+        session_id: str,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Load a bounded recent transcript, beginning at a user-message boundary."""
+        bounded_limit = max(1, min(int(limit), 1_000))
+        rows = self.db.execute(
+            "SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?",
+            (session_id, bounded_limit),
+        ).fetchall()
+        messages = [dict(row) for row in reversed(rows)]
+        if len(messages) == bounded_limit and messages:
+            while messages and messages[0]["role"] != "user":
+                messages.pop(0)
+        for message in messages:
+            message["tool_calls"] = (
+                json.loads(message["tool_calls"])
+                if message.get("tool_calls") else None
+            )
+        return messages
+
     def get_message_id_by_tool_use_id(
         self, session_id: str, tool_use_id: str,
     ) -> int | None:

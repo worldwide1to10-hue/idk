@@ -49,8 +49,17 @@ MAX_TASKS_PER_RECOVERY_CHAIN = MAX_TASKS * (MAX_TASK_RECOVERY_DEPTH + 1)
 MAX_DEPENDENCY_CONTEXT_CHARS = 12_000
 MAX_TASK_SUMMARY_CHARS = 1_200
 MAX_TASK_RESULT_CHARS = 40_000
-READ_ONLY_WORKER_TOOLS = frozenset({"Read"})
-WRITE_WORKER_TOOLS = frozenset({"Read", "Edit", "Write"})
+READ_ONLY_WORKER_TOOLS = frozenset({
+    "Read", "Grep", "Glob", "GetEditContext", "FindReferences", "RepoMap",
+    "FindCallers", "FindCallees", "FindImports", "PyrightReferences",
+    "PyrightDefinition", "AstGrep",
+})
+WRITE_WORKER_TOOLS = frozenset({
+    "Read", "Grep", "Glob", "GetEditContext", "FindReferences", "RepoMap",
+    "FindCallers", "FindCallees", "FindImports", "PyrightReferences",
+    "PyrightDefinition", "AstGrep",
+    "Edit", "Write",
+})
 
 
 class _TaskAbortController:
@@ -886,6 +895,7 @@ def _child_context(
         task.complexity, task.tier_hint, active_model=parent_model,
     )
     child.allowed_tool_names = allowed_tools
+    child.active_mcp_tool_names = set()
     child.file_scope = scope
     child.project_root = scope.project_root
     child.session_id = f"task-{uuid.uuid4().hex}"

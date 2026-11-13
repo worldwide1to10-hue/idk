@@ -23,6 +23,18 @@ def main():
     assert store.count_messages(sid) == 3
     print("✅ Append messages OK")
 
+    sessions = store.list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0]["session_id"] == sid
+    assert sessions[0]["message_count"] == 3
+    assert sessions[0]["title"] == "hello world"
+    assert store.get_session_messages(sid, limit=3)[0]["content"] == "hello world"
+    # A bounded tail may discard an incomplete assistant/tool round.
+    assert [row["content"] for row in store.get_session_messages(sid, limit=2)] == [
+        "how are you?",
+    ]
+    print("✅ Session list and bounded transcript restore OK")
+
     # ── 2. get_message ──
     row = store.get_message(m2)
     assert row["role"] == "assistant"

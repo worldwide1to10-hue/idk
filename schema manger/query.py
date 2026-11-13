@@ -791,9 +791,12 @@ def _publish_query_messages(params: QueryParams, messages: list) -> None:
 def _tools_for_context(context: ToolUseContext | None) -> list:
     tools = all_tools()
     allowed = getattr(context, "allowed_tool_names", None)
+    active_mcp = getattr(context, "active_mcp_tool_names", set())
     available = []
     for tool in tools:
         if allowed is not None and tool.name not in allowed:
+            continue
+        if getattr(tool, "is_mcp", False) and tool.name not in active_mcp:
             continue
         try:
             if tool.is_enabled():

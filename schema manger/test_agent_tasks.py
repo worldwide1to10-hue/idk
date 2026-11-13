@@ -358,7 +358,11 @@ async def main():
                 output = "over budget"
             else:
                 assert active_readers == 0
-                assert worker.allowed_tool_names == frozenset({"Read", "Edit", "Write"})
+                assert worker.allowed_tool_names == frozenset({
+                    "Read", "Grep", "Glob", "GetEditContext", "FindReferences",
+                    "RepoMap", "FindCallers", "FindCallees", "PyrightReferences",
+                    "FindImports", "PyrightDefinition", "AstGrep", "Edit", "Write",
+                })
                 assert worker.file_scope.check_access("Write", output_path) is None
                 assert worker.file_scope.check_access("Write", second_path) is not None
                 active_writers += 1
@@ -534,7 +538,11 @@ async def main():
         assert "Both source files use UTF-8" in prompts["combine"]
         assert "The combined count equals both inputs" in prompts["combine"]
         assert '"answer": "42"' in prompts["combine"]
-        assert worker_tools["first"] == frozenset({"Read"})
+        assert worker_tools["first"] == frozenset({
+            "Read", "Grep", "Glob", "GetEditContext", "FindReferences",
+            "RepoMap", "FindCallers", "FindCallees", "PyrightReferences",
+            "FindImports", "PyrightDefinition", "AstGrep",
+        })
         assert "Task" not in worker_tools["combine"]
         assert worker_models["first"] == resolve_task_model(1, "T1")
         assert worker_models["second"] == "test/parent-fallback"

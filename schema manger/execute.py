@@ -111,6 +111,14 @@ async def execute_tool(
             tool_use_id, tool_name,
             f"Tool {tool_name} is not available in this task context.",
         )
+    if (
+        getattr(tool, "is_mcp", False)
+        and tool_name not in getattr(context, "active_mcp_tool_names", set())
+    ):
+        return _error_result(
+            tool_use_id, tool_name,
+            f"MCP tool {tool_name} has not been activated by ToolSearch in this context.",
+        )
 
     # ── 2. Abort check (before doing any work) ──
     abort = getattr(context, "abort_controller", None)
@@ -120,9 +128,7 @@ async def execute_tool(
     signal = check_loop(_guard_state(context), tool_name, raw_input)
     if signal.action == "block":
         return _error_result(tool_use_id, tool_name, signal.reason)
-    elif signal.action == "warn":
-        # Let it run, but note the warning; the caller can surface it
-        pass
+    loop_warning = signal.reason if signal.action == "warn" else None
 
 
     # ── 3. Schema parse ──
@@ -139,6 +145,23 @@ async def execute_tool(
     if file_scope is not None and tool_name in ("Read", "Edit", "Write"):
         path_error = file_scope.check_access(
             tool_name, getattr(parsed_input, "file_path", ""),
+        )
+        if path_error:
+            return _error_result(tool_use_id, tool_name, path_error)
+    if file_scope is not None and tool_name in (
+        "GetEditContext", "FindReferences", "FindImports",
+    ):
+        path_error = file_scope.check_access(
+            "Read", getattr(parsed_input, "file_path", ""),
+        )
+        if path_error:
+            return _error_result(tool_use_id, tool_name, path_error)
+    if file_scope is not None and tool_name in (
+        "Grep", "Glob", "RepoMap", "FindCallers", "FindCallees", "IndexCode",
+        "FindImports", "PyrightReferences", "PyrightDefinition", "AstGrep",
+    ):
+        path_error = file_scope.check_search_access(
+            getattr(parsed_input, "path", "."),
         )
         if path_error:
             return _error_result(tool_use_id, tool_name, path_error)
@@ -271,6 +294,16 @@ async def execute_tool(
     except Exception as e:
         logger.error("Tool %s map_tool_result raised: %s", tool_name, e)
         return _error_result(tool_use_id, tool_name, f"Result formatting failed: {e}")
+
+    if loop_warning:
+        warning = f"[Loop guard] {loop_warning}"
+        content = block.get("content")
+        if isinstance(content, str):
+            block["content"] = f"{content}\n\n{warning}" if content else warning
+        elif isinstance(content, list):
+            block["content"] = [*content, {"type": "text", "text": warning}]
+        else:
+            block["content"] = warning
 
     # ── 11. Build result message ──
     result_message = ToolResultMessage(

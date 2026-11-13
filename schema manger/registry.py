@@ -10,6 +10,13 @@ def register(tool: Tool) -> Tool:
     return tool
 
 
+def unregister(name: str, expected: Tool | None = None) -> None:
+    """Remove a tool, optionally only when it is still the expected instance."""
+    current = TOOLS.get(name)
+    if current is not None and (expected is None or current is expected):
+        TOOLS.pop(name, None)
+
+
 def find(name: str) -> Tool | None:
     return TOOLS.get(name)
 

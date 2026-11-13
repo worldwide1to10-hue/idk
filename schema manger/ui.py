@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from datetime import datetime
 from typing import Any
 
 from textual import on, work
@@ -18,7 +19,11 @@ from textual.widgets import (
 
 from api import get_active_model, list_models, set_active_model
 from main import _persist_query_messages, build_context, build_full_system_prompt
-from messages import ProgressMessage, ToolResultMessage, create_user_message
+from messages import (
+    AssistantMessage, ProgressMessage, ToolResultBlock, ToolResultMessage,
+    ToolUseBlock, UserMessage as AgentUserMessage, create_assistant_message,
+    create_tool_result, create_user_message,
+)
 from query import QueryParams, query
 from query_transitions import Terminal
 from registry import all_tools
@@ -118,7 +123,7 @@ class SystemNotice(Static):
         self._text = text
         self._level = level.upper()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self.update(f"{self._level}  {self._text}")
 
 
@@ -210,17 +215,28 @@ class AgentApp(App):
     CSS = """
     Screen { layout: vertical; background: $background; }
     Header { dock: top; }
+    #workspace { height: 1fr; min-height: 8; }
+    #session-sidebar { width: 30; min-width: 24; padding: 1; border-right: tall $primary; }
+    #sidebar-title { height: 1; margin-bottom: 1; text-style: bold; color: $accent; }
+    #new-session-button, #tools-button { width: 1fr; height: 3; margin-bottom: 1; }
+    #session-filter { margin-bottom: 1; }
+    #session-list { height: 1fr; min-height: 5; }
+    .session-button { width: 1fr; height: 3; margin-bottom: 1; content-align: left middle; }
+    #sidebar-status { height: auto; max-height: 5; color: $text-muted; margin-top: 1; }
+    #main-pane { width: 1fr; }
+    #session-heading { height: 2; padding: 0 2; background: $panel; content-align: left middle; }
     #transcript { height: 1fr; min-height: 8; padding: 0 2; }
     UserMessage { margin: 1 0 0 0; padding: 0 1; border-left: thick $accent; }
     StreamingMarkdown { margin: 0 0 1 2; padding: 0 1; }
     ToolCard { margin: 0 0 1 2; }
     SystemNotice { margin: 0 0 1 2; color: $text-muted; }
-    #plan-panel { max-height: 10; margin: 0 2; }
-    #status { height: 1; padding: 0 2; background: $panel; }
+    #plan-panel { max-height: 8; margin: 0 2; }
+    #status { height: 1; padding: 0 2; background: $panel; margin: 0 2; }
     #spinner { width: 3; }
     #activity { width: 1fr; }
     #tokens { width: 16; text-align: right; }
-    #composer { dock: bottom; height: 3; margin: 0 2 1 2; border: tall $accent; }
+    #composer { height: 3; margin: 0 2 1 2; border: tall $accent; }
+    #tools-view { height: 1fr; padding: 1 2; }
     #permission-dialog { width: 72; height: auto; padding: 1 2; border: thick $warning; background: $surface; }
     #permission-title { text-style: bold; color: $warning; margin-bottom: 1; }
     #permission-message { max-height: 12; margin-bottom: 1; }
@@ -232,6 +248,8 @@ class AgentApp(App):
         Binding("ctrl+c", "interrupt", "Exit", priority=True),
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+l", "new_session", "New session"),
+        Binding("ctrl+1", "show_current", "Current"),
+        Binding("ctrl+2", "show_tools", "Tools"),
     ]
 
     def __init__(self) -> None:
@@ -245,25 +263,61 @@ class AgentApp(App):
         self._exit_when_idle = False
         self._permission_lock = asyncio.Lock()
         self._permission_waiters = 0
+        self._session_buttons: dict[str, str] = {}
+        self._selected_session_id = self.ctx.session_id
+        self._active_view = "current"
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll(id="transcript"):
-            pass
-        yield PlanPanel()
-        yield StatusBar(id="status")
-        yield Input(placeholder="Message the agent...  (/help for commands)", id="composer")
+        with Horizontal(id="workspace"):
+            with Vertical(id="session-sidebar"):
+                yield Label("RECENT SESSIONS", id="sidebar-title")
+                yield Button("+ New session", id="new-session-button", variant="primary")
+                yield Button("Tool catalog", id="tools-button")
+                yield Input(placeholder="Filter sessions", id="session-filter")
+                with VerticalScroll(id="session-list"):
+                    pass
+                yield Static("", id="sidebar-status", markup=False)
+            with Vertical(id="main-pane"):
+                yield Label("CURRENT SESSION", id="session-heading")
+                with VerticalScroll(id="transcript"):
+                    pass
+                with VerticalScroll(id="tools-view"):
+                    yield Static("", id="tool-catalog", markup=False)
+                yield PlanPanel()
+                yield StatusBar(id="status")
+                yield Input(placeholder="Message the agent...  (/help for commands)", id="composer")
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self._update_header()
         self.query_one(StatusBar).set_idle()
         self.query_one("#composer", Input).focus()
-        tool_names = ", ".join(tool.name for tool in all_tools())
         self._append_widget(SystemNotice(
-            f"Ready on {get_active_model()} | Tools: {tool_names}",
+            f"Ready on {get_active_model()} | {len(all_tools())} tools",
         ))
+        self.query_one("#tools-view").display = False
+        await self._refresh_sessions()
+        self._refresh_sidebar_status()
         self._refresh_plan()
+
+    @on(Input.Changed, "#session-filter")
+    async def on_session_filter_changed(self, event: Input.Changed) -> None:
+        await self._refresh_sessions(event.value)
+
+    @on(Button.Pressed, "#new-session-button")
+    async def on_new_session_button(self, _event: Button.Pressed) -> None:
+        await self.action_new_session()
+
+    @on(Button.Pressed, "#tools-button")
+    def on_tools_button(self, _event: Button.Pressed) -> None:
+        self.action_show_tools()
+
+    @on(Button.Pressed, ".session-button")
+    async def on_session_button(self, event: Button.Pressed) -> None:
+        session_id = self._session_buttons.get(event.button.id or "")
+        if session_id:
+            await self._select_session(session_id)
 
     @on(Input.Submitted, "#composer")
     def on_submit(self, event: Input.Submitted) -> None:
@@ -307,7 +361,7 @@ class AgentApp(App):
             except Exception as error:
                 self._append_widget(SystemNotice(str(error), "error"))
         elif text in ("/clear", "/new"):
-            self.action_new_session()
+            self.run_worker(self.action_new_session(), group="session")
         else:
             return False
         return True
@@ -347,6 +401,8 @@ class AgentApp(App):
                 self._current_markdown.finish()
             _persist_query_messages(self.ctx, state.messages)
             self._refresh_plan()
+            await self._refresh_sessions()
+            self._refresh_sidebar_status()
             self.query_one(StatusBar).set_idle()
             composer = self.query_one("#composer", Input)
             composer.disabled = False
@@ -453,6 +509,189 @@ class AgentApp(App):
         plan = store.get_plan(session_id) if store is not None and session_id else None
         self.query_one(PlanPanel).refresh_from_plan(plan)
 
+    async def _refresh_sessions(self, filter_text: str = "") -> None:
+        store = getattr(self.ctx, "_store", None)
+        if store is None:
+            return
+        session_list = self.query_one("#session-list", VerticalScroll)
+        await session_list.remove_children()
+        self._session_buttons.clear()
+
+        needle = filter_text.strip().casefold()
+        sessions = store.list_sessions(limit=100)
+        visible = []
+        for session in sessions:
+            title = " ".join(str(session.get("title") or "New session").split())
+            last_message = " ".join(str(session.get("last_message") or "").split())
+            if needle and needle not in title.casefold() and needle not in last_message.casefold():
+                continue
+            visible.append((session, title))
+
+        if not visible:
+            session_list.mount(Static("No matching sessions", markup=False))
+            return
+
+        for index, (session, title) in enumerate(visible):
+            session_id = str(session["session_id"])
+            prefix = "CURRENT  " if session_id == self._selected_session_id else ""
+            title = title if len(title) <= 23 else title[:20] + "..."
+            updated = datetime.fromtimestamp(
+                float(session.get("updated_at") or 0),
+            ).strftime("%m-%d %H:%M")
+            label = f"{prefix}{title}\n{updated} · {session['message_count']} messages"
+            button_id = f"session-item-{index}"
+            self._session_buttons[button_id] = session_id
+            session_list.mount(Button(label, id=button_id, classes="session-button"))
+
+    def _refresh_sidebar_status(self) -> None:
+        manager = getattr(self.ctx, "mcp_manager", None)
+        configured = bool(
+            manager is not None
+            and getattr(manager, "config_path", None)
+            and manager.config_path.is_file()
+        )
+        connected = len(getattr(manager, "_connections", {})) if manager else 0
+        mcp_status = (
+            f"MCP: {connected} connected"
+            if connected else "MCP: configured" if configured else "MCP: not configured"
+        )
+        tools = {tool.name for tool in all_tools()}
+        code_features = [
+            name for name in ("Grep", "Glob", "RepoMap", "FindReferences", "PyrightReferences", "AstGrep")
+            if name in tools
+        ]
+        self.query_one("#sidebar-status", Static).update(
+            mcp_status + "\nCode: " + ", ".join(code_features),
+        )
+
+    async def _select_session(self, session_id: str) -> None:
+        if self._worker is not None and not self._worker.is_finished:
+            self._append_widget(SystemNotice(
+                "Interrupt the active turn before switching sessions.", "warn",
+            ))
+            return
+        store = getattr(self.ctx, "_store", None)
+        if store is None or session_id == self._selected_session_id:
+            return
+
+        rows = store.get_session_messages(session_id, limit=200)
+        restored = []
+        for row in rows:
+            role = row.get("role")
+            if role == "user":
+                restored.append(create_user_message(row.get("content") or ""))
+            elif role == "assistant":
+                calls = [
+                    ToolUseBlock(
+                        id=str(call.get("id", "")),
+                        name=str(call.get("name", "")),
+                        input=call.get("input") or {},
+                    )
+                    for call in row.get("tool_calls") or []
+                ]
+                restored.append(create_assistant_message(
+                    content=row.get("content") or None,
+                    tool_calls=calls,
+                    stop_reason="tool_calls" if calls else "end_turn",
+                ))
+            elif role == "tool":
+                restored.append(create_tool_result(
+                    str(row.get("tool_use_id") or ""),
+                    str(row.get("content") or ""),
+                ))
+
+        pending_calls = {
+            call.id: call
+            for message in restored
+            if isinstance(message, AssistantMessage)
+            for call in message.tool_calls
+        }
+        completed_calls = {
+            message.tool_use_id for message in restored
+            if isinstance(message, ToolResultMessage)
+        }
+        for tool_id in pending_calls.keys() - completed_calls:
+            restored.append(create_tool_result(
+                tool_id,
+                "Historical tool call was incomplete and was not re-executed.",
+                is_error=True,
+            ))
+
+        state = self.ctx.get_app_state()
+        state.messages[:] = restored
+        self.ctx.messages = state.messages
+        self.ctx.session_id = session_id
+        self._selected_session_id = session_id
+        self.ctx.active_mcp_tool_names = set()
+        self.ctx._stored_message_ids = [row["id"] for row in rows]
+        self.ctx._stored_message_uuids = {message.uuid for message in restored}
+        self.ctx._summary_source_offset = len(self.ctx._stored_message_ids)
+
+        transcript = self.query_one("#transcript", VerticalScroll)
+        await transcript.remove_children()
+        self._tool_cards.clear()
+        for message in restored:
+            if isinstance(message, AgentUserMessage):
+                text = message.content if isinstance(message.content, str) else str(message.content)
+                transcript.mount(UserMessage(text))
+            elif isinstance(message, AssistantMessage):
+                if message.content:
+                    markdown = StreamingMarkdown()
+                    markdown.append_text(message.content)
+                    markdown.finish()
+                    transcript.mount(markdown)
+                for call in message.tool_calls:
+                    card = ToolCard(call.id, call.name, self._summarize_input(call.input))
+                    self._tool_cards[call.id] = card
+                    transcript.mount(card)
+            elif isinstance(message, ToolResultMessage):
+                card = self._tool_cards.get(message.tool_use_id)
+                if card is not None:
+                    card.set_done(message.content, is_error=message.is_error)
+                else:
+                    transcript.mount(SystemNotice(
+                        f"Tool result {message.tool_use_id}: {message.content[:160]}",
+                        "error" if message.is_error else "info",
+                    ))
+
+        session = next(
+            (item for item in store.list_sessions(limit=100)
+             if item["session_id"] == session_id),
+            None,
+        )
+        title = " ".join(str(session.get("title") or "Session").split()) if session else "Session"
+        self.query_one("#session-heading", Label).update(title[:80])
+        self._active_view = "current"
+        self._show_current_view()
+        self._refresh_plan()
+        await self._refresh_sessions()
+        self._update_header()
+
+    def _show_current_view(self) -> None:
+        self._active_view = "current"
+        self.query_one("#tools-view").display = False
+        self.query_one("#transcript").display = True
+        self.query_one(PlanPanel).display = True
+        self.query_one(StatusBar).display = True
+        self.query_one("#composer", Input).display = True
+
+    def action_show_current(self) -> None:
+        self._show_current_view()
+
+    def action_show_tools(self) -> None:
+        tools_view = self.query_one("#tools-view", VerticalScroll)
+        catalog = self.query_one("#tool-catalog", Static)
+        catalog.update("\n\n".join(
+            f"{tool.name}\n{tool.search_hint or tool.description}"
+            for tool in all_tools()
+        ))
+        self.query_one("#transcript").display = False
+        self.query_one(PlanPanel).display = False
+        self.query_one(StatusBar).display = False
+        self.query_one("#composer", Input).display = False
+        tools_view.display = True
+        self._active_view = "tools"
+
     def _show_runtime_activity(self, event: dict) -> None:
         area = event.get("area")
         if area == "memory":
@@ -550,7 +789,7 @@ class AgentApp(App):
         worker.cancel()
         self.query_one(StatusBar).set_running("Closing")
 
-    def action_new_session(self) -> None:
+    async def action_new_session(self) -> None:
         if self._worker is not None and not self._worker.is_finished:
             self._append_widget(SystemNotice(
                 "Interrupt the active turn before starting a new session.", "warn",
@@ -561,16 +800,24 @@ class AgentApp(App):
         state.read_file_cache = FileStateCache()
         self.ctx.read_file_state = state.read_file_cache
         self.ctx.session_id = f"ui-{uuid.uuid4().hex[:12]}"
+        self.ctx.active_mcp_tool_names = set()
         self.ctx._stored_message_ids = []
         self.ctx._stored_message_uuids = set()
         self.ctx._summary_source_offset = 0
-        for child in list(self.query_one("#transcript", VerticalScroll).children):
-            child.remove()
+        await self.query_one("#transcript", VerticalScroll).remove_children()
+        await self.query_one("#session-list", VerticalScroll).remove_children()
         self._update_header()
+        self.query_one("#session-heading", Label).update("CURRENT SESSION")
+        self._show_current_view()
         self._refresh_plan()
+        await self._refresh_sessions()
+        self._refresh_sidebar_status()
         self._append_widget(SystemNotice("Started a fresh session."))
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
+        manager = getattr(self.ctx, "mcp_manager", None)
+        if manager is not None:
+            await manager.close()
         store = getattr(self.ctx, "_store", None)
         if store is not None:
             store.close()

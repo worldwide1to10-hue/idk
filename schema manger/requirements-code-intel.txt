@@ -1,0 +1,4 @@
+tree-sitter==0.26.1
+tree-sitter-language-pack==1.25.0
+jedi==0.20.1
+pyright==1.1.414

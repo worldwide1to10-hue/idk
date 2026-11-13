@@ -97,6 +97,21 @@ async def main():
     assert r.result_block["tool_use_id"] == "t1"
     print("✅ Happy path OK")
 
+    # ── 1b. Loop warnings reach the model before the hard block ──
+    loop_ctx = make_ctx()
+    loop_results = [
+        await execute_tool(
+            {"id": f"loop-{index}", "name": "Doubler", "input": {"x": 9}},
+            loop_ctx,
+        )
+        for index in range(1, 6)
+    ]
+    assert "[Loop guard]" in loop_results[2].result_message.content
+    assert "[Loop guard]" in loop_results[3].result_message.content
+    assert loop_results[4].is_error is True
+    assert "This is a loop" in loop_results[4].result_message.content
+    print("✅ Loop warning reaches model before hard block")
+
     # ── 2. Unknown tool ──
     r = await execute_tool({"id": "t2", "name": "Nope", "input": {}}, make_ctx())
     assert r.is_error is True and "Unknown tool" in r.result_message.content

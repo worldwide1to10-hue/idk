@@ -7,6 +7,7 @@ os.environ["AGENT_STORE_PATH"] = ":memory:"
 from textual.widgets import Button, Header, Input
 
 import ui
+from main import _persist_query_messages
 from messages import ProgressMessage, ToolResultMessage
 from registry import find
 from ui import (
@@ -26,6 +27,56 @@ async def main():
         assert find("Write") is not None
         assert find("Bash") is not None
         assert app.ctx._store.count_messages(app.ctx.session_id) == 0
+        restored_id = "ui-restored-session"
+        app.ctx._store.append_message(restored_id, "user", "Older task title")
+        app.ctx._store.append_message(
+            restored_id,
+            "assistant",
+            "I will inspect the source.",
+            tool_calls=[
+                {"id": "completed-tool", "name": "Read", "input": {"file_path": "src.py"}},
+                {"id": "unfinished-tool", "name": "Grep", "input": {"pattern": "needle"}},
+            ],
+        )
+        app.ctx._store.append_message(
+            restored_id, "tool", "source contents", tool_use_id="completed-tool",
+        )
+        app.ctx._store.append_message("ui-other-session", "user", "Another task")
+        await app._refresh_sessions("older task")
+        assert len(app._session_buttons) == 1
+        await app._select_session(restored_id)
+        assert app.ctx.session_id == restored_id
+        restored_messages = app.ctx.get_app_state().messages
+        restored_calls = [
+            call.id for message in restored_messages
+            if getattr(message, "type", None) == "assistant"
+            for call in getattr(message, "tool_calls", [])
+        ]
+        assert restored_calls == ["completed-tool", "unfinished-tool"]
+        unfinished_result = next(
+            message for message in restored_messages
+            if getattr(message, "type", None) == "tool_result"
+            and message.tool_use_id == "unfinished-tool"
+        )
+        assert unfinished_result.is_error
+        assert "not re-executed" in unfinished_result.content
+        restored_messages.append(ui.create_user_message("follow-up"))
+        _persist_query_messages(app.ctx, restored_messages)
+        assert app.ctx._store.count_messages(restored_id) == 4
+        print("✅ Session filtering/restoration avoids replay and duplicate history")
+
+        await app.action_new_session()
+        assert app.ctx.session_id != restored_id
+        assert app.ctx.get_app_state().messages == []
+        assert app.ctx._store.count_messages(restored_id) == 4
+        app.action_show_tools()
+        assert app._active_view == "tools"
+        assert app.query_one("#tools-view").display
+        app.action_show_current()
+        assert app._active_view == "current"
+        assert app.query_one("#transcript").display
+        print("✅ New session and tool catalog views work")
+
         app._append_widget(UserMessage("hello from user"))
         streaming = StreamingMarkdown()
         app._append_widget(streaming)
